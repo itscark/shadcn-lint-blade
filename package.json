@@ -1,0 +1,42 @@
+{
+    "name": "@itscark/shadcn-lint-blade",
+    "version": "0.1.0",
+    "description": "An ESLint parser that lets @shadcn/lint lint Laravel Blade and Livewire views.",
+    "keywords": [
+        "eslint",
+        "eslint-parser",
+        "shadcn",
+        "blade",
+        "laravel",
+        "livewire",
+        "flux",
+        "tailwindcss"
+    ],
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/itscark/shadcn-lint-blade.git"
+    },
+    "type": "module",
+    "exports": "./src/parser.mjs",
+    "files": [
+        "src"
+    ],
+    "scripts": {
+        "test": "node --test"
+    },
+    "dependencies": {
+        "espree": "^11.2.0"
+    },
+    "peerDependencies": {
+        "@shadcn/lint": ">=0.2.3",
+        "eslint": ">=9.30.0"
+    },
+    "devDependencies": {
+        "@shadcn/lint": "^0.2.3",
+        "eslint": "^10.13.0"
+    },
+    "engines": {
+        "node": ">=20.19"
+    }
+}

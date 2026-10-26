@@ -1,0 +1,12 @@
+@import 'tailwindcss';
+
+/* A Flux-style theme: a declared gray scale, the accent trio, a brand color. */
+@theme {
+    --color-zinc-100: #f4f5f7;
+    --color-zinc-500: #626873;
+    --color-brand: #059669;
+    --color-accent: #c8f04a;
+    --color-accent-content: #5c7c00;
+    --color-accent-foreground: #0c1100;
+    --radius-lg: 0.625rem;
+}
