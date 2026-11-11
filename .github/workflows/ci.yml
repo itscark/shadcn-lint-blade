@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+  release:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    concurrency: release
+    permissions:
+      contents: write # the version commit, the tag and the GitHub release
+      issues: write # the comment on an issue a release resolves
+      pull-requests: write # the comment on a pull request a release ships
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # semantic-release reads the tags and every commit since the last one.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      - run: npx --yes -p semantic-release@25 -p @semantic-release/exec@7 -p @semantic-release/git@11 semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

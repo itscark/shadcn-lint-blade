@@ -25,6 +25,38 @@
     "scripts": {
         "test": "node --test"
     },
+    "release": {
+        "branches": [
+            "main"
+        ],
+        "plugins": [
+            "@semantic-release/commit-analyzer",
+            "@semantic-release/release-notes-generator",
+            [
+                "@semantic-release/npm",
+                {
+                    "npmPublish": false
+                }
+            ],
+            [
+                "@semantic-release/exec",
+                {
+                    "prepareCmd": "sed -i -E 's/(shadcn-lint-blade#v)[0-9]+\\.[0-9]+\\.[0-9]+/\\1${nextRelease.version}/' README.md"
+                }
+            ],
+            [
+                "@semantic-release/git",
+                {
+                    "assets": [
+                        "package.json",
+                        "package-lock.json",
+                        "README.md"
+                    ]
+                }
+            ],
+            "@semantic-release/github"
+        ]
+    },
     "dependencies": {
         "espree": "^11.2.0"
     },

@@ -12,7 +12,8 @@ plugin release that changes that reader may need a release here.
 
 ## Install
 
-The package is not on npm. Install it from GitHub, pinned to a tag:
+The package is not on npm. Install it from GitHub, pinned to a
+[release](https://github.com/itscark/shadcn-lint-blade/releases) tag:
 
 ```bash
 npm install --save-dev eslint @shadcn/lint github:itscark/shadcn-lint-blade#v0.1.0
@@ -137,6 +138,15 @@ npm test
 
 `test/parser.test.mjs` lints through ESLint's `Linter` and the plugin against
 `test/fixtures/project`, a project of its own so the plugin discovers that theme.
+
+## Releases
+
+CI cuts the releases. Every push to `main` that passes the tests runs
+[semantic-release](https://semantic-release.gitbook.io), which reads the
+[Conventional Commits](https://www.conventionalcommits.org) since the last tag: `fix:` is a patch,
+`feat:` a minor, a `BREAKING CHANGE:` footer a major. It commits the new version to
+`package.json` and to the install line above, tags it `vX.Y.Z` and publishes a GitHub release
+with the notes. A push without a `fix` or `feat` commit releases nothing.
 
 ## License
 

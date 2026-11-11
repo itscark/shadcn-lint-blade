@@ -20,12 +20,16 @@
  *   { files: ['**\/*.blade.php'], languageOptions: { parser: blade } }
  */
 
+import { createRequire } from 'node:module';
+
 import * as espree from 'espree';
 
 import { parseBladeTemplate } from './blade-template.mjs';
 import { createLocator } from './source-locations.mjs';
 
-export const meta = { name: '@itscark/shadcn-lint-blade', version: '0.1.0' };
+const { name, version } = createRequire(import.meta.url)('../package.json');
+
+export const meta = { name, version };
 
 const TEMPLATE_KEYS = {
     VDocumentFragment: ['children'],
