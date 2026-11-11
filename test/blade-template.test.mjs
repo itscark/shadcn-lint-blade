@@ -77,7 +77,7 @@ test('a class with an echo inside is a bound TemplateLiteral: text chunks are cl
     assert.equal(source.slice(...template.expressions[0].consequent.range), "'ring-2'");
 });
 
-test('@class() is a bound class carrying the PHP array; @style() a style object by property', () => {
+test('@class() is a bound class carrying the PHP array; @style() its entries as CSS text', () => {
     const source = `<flux:card @class(['p-4', 'border-red-300' => $tone === 'red']) @style(['color: red' => $x, 'display: none'])>x</flux:card>`;
     const { fragment } = parse(source);
     const [card] = elements(fragment);
@@ -87,7 +87,38 @@ test('@class() is a bound class carrying the PHP array; @style() a style object 
     assert.equal(klass.value.expression.type, 'ArrayExpression');
     assert.equal(klass.value.expression.elements[1].properties[0].key.value, 'border-red-300');
     assert.equal(source.slice(...klass.range), "@class(['p-4', 'border-red-300' => $tone === 'red'])");
-    assert.deepEqual(style.value.expression.properties.map((property) => [property.key.value, property.value.value]), [['color', 'red'], ['display', 'none']]);
+    assert.equal(style.value.expression.operator, '||');
+    assert.deepEqual([style.value.expression.left.value, style.value.expression.right.value], ['color: red', 'display: none']);
+});
+
+test('a bare directive in a class value is a hole; Tailwind\'s @container stays a class', () => {
+    const { fragment } = parse(`<input class="p-4 @error('email') is-invalid @enderror"><div class="flex @auth grid @endauth"></div><div class="@container @lg:flex"></div>`);
+    const [input, div, container] = elements(fragment);
+    const chunks = (element) => attribute(element, 'class').value.expression?.quasis.map((quasi) => quasi.value.cooked);
+
+    assert.deepEqual(chunks(input), ['p-4 ', ' is-invalid ', '']);
+    assert.deepEqual(chunks(div), ['flex ', ' grid ', '']);
+    assert.equal(attribute(container, 'class').value.value, '@container @lg:flex');
+});
+
+test('an unquoted value steps over an echo, so its -> does not end the tag', () => {
+    const { fragment } = parse(`<option value={{ $item->id }} class="z">x</option>`);
+
+    assert.equal(attribute(elements(fragment)[0], 'class')?.value.value, 'z');
+});
+
+test('x: is a component prefix like x-', () => {
+    const { fragment } = parse(`<x:badge :class="$flush ? 'p-0' : ''">x</x:badge>`);
+    const [badge] = elements(fragment);
+
+    assert.equal(badge.rawName, 'x-badge');
+    assert.equal(attribute(badge, 'class').value.expression.type, 'ConditionalExpression');
+});
+
+test('an escaped @@php and a handle followed by unbalanced parentheses are text', () => {
+    for (const source of [`@@php\n<div class="a"></div>`, `<p>@laravel (it's great)</p><div class="a"></div><p>don't</p>`]) {
+        assert.deepEqual(elements(parse(source).fragment).filter((element) => element.name === 'div').length, 1, source);
+    }
 });
 
 test('a colon attribute is PHP on a component tag and Alpine JavaScript on a plain element', () => {

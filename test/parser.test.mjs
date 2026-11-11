@@ -39,6 +39,13 @@ function found(code, rules) {
     });
 }
 
+/** `line:column` of the first occurrence of `text`, the way ESLint counts. */
+function at(code, text) {
+    const before = code.slice(0, code.indexOf(text)).split('\n');
+
+    return `${before.length}:${before.at(-1).length + 1}`;
+}
+
 test('runs @shadcn/lint over a Livewire single-file component through its Vue reader', () => {
     const code = `<?php
 use Livewire\\Component;
@@ -83,6 +90,81 @@ test('follows a class string assigned in @php one hop into {{ $attributes->class
 `;
 
     assert.deepEqual(found(code), ['shadcn/no-arbitrary-values 2:16 text-[#706f6c]']);
+});
+
+test('a variable is read with every value assigned to it: reassigned, appended, in a block, behind a match', () => {
+    const code = `@php
+    $classes = 'p-4';
+    $classes .= ' bg-pink-500';
+    if ($wide) { $classes = 'p-[13px]'; }
+    switch ($tone) {
+        case 'red': $tint = 'bg-emerald-500'; break;
+        default: $tint = match ($x) { 'a' => 'p-2', default => 'p-4' } . ' text-[#706f6c]';
+    }
+@endphp
+<a class="{{ $classes }} {{ $tint }}">z</a>
+`;
+
+    assert.deepEqual(found(code), [
+        `shadcn/no-raw-colors ${at(code, "' bg-pink-500'")} bg-pink-500`,
+        `shadcn/no-arbitrary-values ${at(code, "'p-[13px]'")} p-[13px]`,
+        `shadcn/no-raw-colors ${at(code, "'bg-emerald-500'")} bg-emerald-500`,
+        `shadcn/no-arbitrary-values ${at(code, "' text-[#706f6c]'")} text-[#706f6c]`,
+    ]);
+});
+
+test('a variable assigned in two @php blocks is read with both values', () => {
+    const code = `@php $classes = 'p-4'; @endphp
+<a class="{{ $classes }}">y</a>
+@php $classes = 'bg-pink-500'; @endphp
+<b class="{{ $classes }}">z</b>
+`;
+
+    assert.deepEqual(found(code), [`shadcn/no-raw-colors ${at(code, "'bg-pink-500'")} bg-pink-500`]);
+});
+
+test('a hole whose strings bring their own space does not glue to its neighbour; a half class still does', () => {
+    const code = `<a class="nav-link{{ $active ? ' bg-pink-500' : '' }}">z</a>
+@php $classes = 'p-4' . ($wide ? ' p-[13px]' : ' p-2'); @endphp
+<a class="{{ $classes }}">z</a>
+<a class="btn{{ $x ? ' bg-emerald-500' : '' }}-lg">z</a>
+`;
+
+    assert.deepEqual(found(code), [
+        `shadcn/no-raw-colors ${at(code, "' bg-pink-500'")} bg-pink-500`,
+        `shadcn/no-arbitrary-values ${at(code, "' p-[13px]'")} p-[13px]`,
+    ]);
+});
+
+test('a slot bag, twMerge and every chained class call are class sites', () => {
+    const code = `<div {{ $heading->attributes->class(['bg-pink-500']) }}></div>
+<div {{ $attributes->class('bg-emerald-500')->merge(['class' => 'p-[13px]'])->twMerge('text-[#706f6c]') }}></div>
+`;
+
+    assert.deepEqual(found(code), [
+        `shadcn/no-raw-colors ${at(code, "'bg-pink-500'")} bg-pink-500`,
+        `shadcn/no-raw-colors ${at(code, "'bg-emerald-500'")} bg-emerald-500`,
+        `shadcn/no-arbitrary-values ${at(code, "'p-[13px]'")} p-[13px]`,
+        `shadcn/no-arbitrary-values ${at(code, "'text-[#706f6c]'")} text-[#706f6c]`,
+    ]);
+});
+
+test('@style judges every declaration of an entry and reports a dynamic entry', () => {
+    const code = `<div @style(['display: none; color: red', $dynamic])></div>`;
+
+    assert.deepEqual(found(code), [
+        `shadcn/no-inline-styles ${at(code, "'display")} Inline style sets color`,
+        `shadcn/no-inline-styles ${at(code, '$dynamic')} Dynamic style object cannot be checked`,
+    ]);
+});
+
+test('a SourceCode linted a second time is walked again', () => {
+    const linter = new Linter({ cwd: FIXTURE });
+    const config = [{ files: ['**/*.blade.php'], languageOptions: { parser: blade }, plugins: { shadcn }, rules: RULES }];
+
+    linter.verify('<div class="bg-pink-500"></div>', config, { filename: PAGE });
+
+    assert.equal(linter.verify(linter.getSourceCode(), config, { filename: PAGE }).length, 1);
 });
 
 test('a class merged through $attributes->merge() is a class site too', () => {

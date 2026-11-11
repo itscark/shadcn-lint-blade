@@ -28,10 +28,14 @@ const NUMBER = /0[xX][0-9a-fA-F_]+|0[bB][01_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-
 const NAME = /[A-Za-z_\\\x80-\uffff][\w\\\x80-\uffff]*/y;
 const COMPARISON = new Set(['<', '>', '<=', '>=']);
 const EQUALITY = new Set(['==', '!=', '===', '!==', '<>', '<=>']);
+const OPEN = new Set(['(', '[', '{']);
+const CLOSE = new Set([')', ']', '}']);
+const ASSIGNMENT = new Set(['=', '.=', '??=']);
+const CONTROL = new Set(['if', 'elseif', 'else', 'for', 'foreach', 'while', 'do', 'switch', 'try', 'catch', 'finally']);
 
 const BAIL = Symbol('php-expression bail');
 
-function stringEnd(text, start) {
+export function stringEnd(text, start) {
     const quote = text[start];
 
     for (let i = start + 1; i < text.length; i++) {
@@ -51,7 +55,7 @@ function lineEnd(text, start) {
     return end === -1 ? text.length : end;
 }
 
-function match(regex, text, at) {
+export function match(regex, text, at) {
     regex.lastIndex = at;
     const found = regex.exec(text);
 
@@ -395,6 +399,66 @@ class ExpressionParser {
         }
     }
 
+    /** Skips to the next top-level operator in `stops`, which stays current; returns the last token skipped. */
+    skipUntil(stops) {
+        let depth = 0;
+        let last;
+
+        for (;;) {
+            const token = this.token;
+
+            if (token === undefined) {
+                throw BAIL;
+            }
+
+            if (token.type === 'op') {
+                if (depth === 0 && stops.includes(token.value)) {
+                    return last;
+                }
+
+                if (OPEN.has(token.value)) {
+                    depth++;
+                } else if (CLOSE.has(token.value)) {
+                    depth--;
+                }
+            }
+
+            last = token;
+            this.p++;
+        }
+    }
+
+    /**
+     * An expression that one of `ends` follows. One that cannot be read (a cast,
+     * `throw`, a bitwise operator) is opaque up to the next top-level `,` or
+     * closing bracket, so the entries around it are still read.
+     */
+    parseEntry(ends) {
+        const from = this.p;
+
+        try {
+            const node = this.parseExpression();
+
+            if (ends.some((end) => this.at(end))) {
+                return node;
+            }
+        } catch (error) {
+            if (error !== BAIL) {
+                throw error;
+            }
+        }
+
+        this.p = from;
+        const first = this.token;
+        const last = this.skipUntil([',', ')', ']', '}']);
+
+        if (last === undefined) {
+            throw BAIL;
+        }
+
+        return this.opaque(first.start, last.end);
+    }
+
     parsePrimary() {
         const token = this.token;
 
@@ -478,37 +542,17 @@ class ExpressionParser {
      */
     parseMatch(start) {
         this.advance();
-        const subject = this.skipGroup();
+        this.skipGroup();
         this.expect('{');
         const arms = [];
         let fallback = null;
 
         while (!this.at('}')) {
             const first = this.token;
-
-            if (first === undefined) {
-                throw BAIL;
-            }
-
-            let isDefault = false;
-
-            while (!this.at('=>')) {
-                if (this.atName('default')) {
-                    isDefault = true;
-                    this.advance();
-                } else {
-                    this.parseExpression();
-                }
-
-                if (this.at(',')) {
-                    this.advance();
-                } else if (!this.at('=>')) {
-                    throw BAIL;
-                }
-            }
-
+            const isDefault = this.atName('default') && this.tokens[this.p + 1]?.value === '=>';
+            this.skipUntil(['=>']);
             const arrow = this.advance();
-            const value = this.parseExpression();
+            const value = this.parseEntry([',', '}']);
 
             if (isDefault) {
                 fallback = value;
@@ -534,7 +578,7 @@ class ExpressionParser {
             });
         }
 
-        return subject === undefined ? node : node;
+        return node;
     }
 
     /** `fn ($x) => ...` and `function () use () {}` are one opaque value. */
@@ -589,7 +633,7 @@ class ExpressionParser {
                 this.advance();
             }
 
-            args.push(this.parseExpression());
+            args.push(this.parseEntry([',', ')']));
 
             if (this.at(',')) {
                 this.advance();
@@ -615,14 +659,14 @@ class ExpressionParser {
         while (!this.at(close)) {
             if (this.at('...')) {
                 const spread = this.advance();
-                const argument = this.parseExpression();
+                const argument = this.parseEntry([',', close]);
                 items.push({ spread, argument });
             } else {
-                const first = this.parseExpression();
+                const first = this.parseEntry([',', close, '=>']);
 
                 if (this.at('=>')) {
                     this.advance();
-                    items.push({ key: first, value: this.parseExpression() });
+                    items.push({ key: first, value: this.parseEntry([',', close]) });
                 } else {
                     items.push({ value: first });
                 }
@@ -808,13 +852,56 @@ class ExpressionParser {
 
         push(chunkEnd, true);
 
-        return this.node(
+        return separateHoles(this.node(
             'TemplateLiteral',
             parts[0].range[0] - this.offset,
             parts[parts.length - 1].range[1] - this.offset,
             { quasis, expressions },
-        );
+        ));
     }
+}
+
+/** Whether every string the expression can yield meets `edge`; an empty one counts when `emptyToo`. */
+function everyString(node, edge, emptyToo) {
+    switch (node.type) {
+        case 'Literal':
+            return node.value === null || node.value === '' ? emptyToo : typeof node.value === 'string' && edge.test(node.value);
+        case 'ConditionalExpression':
+            return everyString(node.consequent, edge, emptyToo) && everyString(node.alternate, edge, emptyToo);
+        case 'LogicalExpression':
+            return everyString(node.left, edge, emptyToo) && everyString(node.right, edge, emptyToo);
+        default:
+            return false;
+    }
+}
+
+/**
+ * The walker drops a class that touches a hole. A hole whose strings bring their
+ * own space (`'a' . ($x ? ' b' : '')`) glues nothing, so that space moves into
+ * the neighbouring chunk's cooked text, which is what the walker tests.
+ */
+export function separateHoles(template) {
+    const { quasis, expressions } = template;
+
+    expressions.forEach((expression, index) => {
+        const before = quasis[index].value;
+        const after = quasis[index + 1].value;
+        // An empty string leaves the two chunks touching each other.
+        const apartAfter = after.cooked === '' ? index + 1 === expressions.length : /^\s/.test(after.cooked);
+        const apartBefore = before.cooked === '' ? index === 0 : /\s$/.test(before.cooked);
+        const opens = everyString(expression, /^\s/, apartAfter);
+        const closes = everyString(expression, /\s$/, apartBefore);
+
+        if (opens && /\S$/.test(before.cooked)) {
+            before.cooked += ' ';
+        }
+
+        if (closes && /^\S/.test(after.cooked)) {
+            after.cooked = ` ${after.cooked}`;
+        }
+    });
+
+    return template;
 }
 
 function setParents(node, parent) {
@@ -887,18 +974,18 @@ function nodeAt(type, start, end, offset, locator, props) {
     return { type, range: [offset + start, offset + end], loc: locator.loc(offset + start, offset + end), ...props };
 }
 
-/** `$x = …`: the variable and how many tokens the target and the `=` take. */
+/** `$x = …`, `$x .= …`, `$x ??= …`: the variable and how many tokens the target and the operator take. */
 function variableTarget(statement, text, offset, locator) {
     const [target, operator] = statement;
 
-    if (statement.length < 3 || target.type !== 'variable' || operator?.type !== 'op' || operator.value !== '=') {
+    if (statement.length < 3 || target.type !== 'variable' || operator?.type !== 'op' || !ASSIGNMENT.has(operator.value)) {
         return null;
     }
 
     return {
         id: nodeAt('Identifier', target.start, target.end, offset, locator, { name: target.value }),
-        start: target.start,
         consumed: 2,
+        appends: operator.value === '.=',
     };
 }
 
@@ -960,49 +1047,73 @@ function destructuringTarget(statement, text, offset, locator) {
         }
     }
 
-    return { id, start: first.start, consumed: i + 2 };
+    return { id, consumed: i + 2 };
 }
 
 /**
- * `$x = expr;` and `[$a, $b] = expr;` statements of a PHP block as `const`
- * declarations, so a class string assigned in `@php` resolves one hop away in
- * the template, the way a `<script setup>` constant does in Vue. Other
- * statements are ignored.
+ * The statements of a PHP block. A control block (`if (…) { … }`) is opened and
+ * a `switch` label ends at its colon, so the statements behind them stand on
+ * their own. Any other brace belongs to a declaration, which ends there, or to
+ * an expression (`match`, a closure), which runs on to its `;`.
  */
-export function parsePhpAssignments(text, offset, locator) {
+function statementsOf(tokens) {
     const statements = [];
     let current = [];
     let depth = 0;
 
-    for (const token of tokenizePhp(text)) {
-        if (token.type === 'op') {
-            if (token.value === '(' || token.value === '[' || token.value === '{') {
-                depth++;
-            } else if (token.value === ')' || token.value === ']' || token.value === '}') {
-                depth = Math.max(0, depth - 1);
+    const end = () => {
+        statements.push(current);
+        current = [];
+    };
 
-                // A block (`if (...) { ... }`) ends at its brace, with no semicolon.
-                if (token.value === '}' && depth === 0) {
-                    current.push(token);
-                    statements.push(current);
-                    current = [];
-                    continue;
-                }
-            } else if (token.value === ';' && depth === 0) {
-                statements.push(current);
-                current = [];
-                continue;
-            }
+    for (const token of tokens) {
+        if (token.type !== 'op') {
+            current.push(token);
+            continue;
+        }
+
+        const keyword = current[0]?.type === 'name' ? current[0].value.toLowerCase() : null;
+        const opensBlock = token.value === '{' && CONTROL.has(keyword);
+        const endsLabel = token.value === ':' && (keyword === 'case' || keyword === 'default');
+
+        if (depth === 0 && (token.value === ';' || token.value === '}' || opensBlock || endsLabel)) {
+            end();
+            continue;
         }
 
         current.push(token);
+
+        if (OPEN.has(token.value)) {
+            depth++;
+        } else if (CLOSE.has(token.value)) {
+            depth = Math.max(0, depth - 1);
+
+            if (depth === 0 && token.value === '}' && keyword !== null) {
+                end();
+            }
+        }
     }
 
-    statements.push(current);
+    end();
 
-    const declarations = [];
+    return statements;
+}
 
-    for (const statement of statements) {
+/**
+ * The assignments of a view's PHP blocks (`{ text, offset }` each) as `const`
+ * declarations, so a class string assigned in `@php` resolves one hop away in
+ * the template, the way a `<script setup>` constant does in Vue. A variable
+ * gets one declaration holding every value assigned to it, because the plugin
+ * reads a variable from its first declaration only. Other statements are
+ * ignored.
+ */
+export function parsePhpAssignments(blocks, locator) {
+    const build = new ExpressionParser([], '', 0, locator);
+    const entries = [];
+    const byName = new Map();
+    const statements = blocks.flatMap(({ text, offset }) => statementsOf(tokenizePhp(text)).map((statement) => ({ statement, text, offset })));
+
+    for (const { statement, text, offset } of statements) {
         const target = destructuringTarget(statement, text, offset, locator) ?? variableTarget(statement, text, offset, locator);
 
         if (target === null) {
@@ -1011,54 +1122,72 @@ export function parsePhpAssignments(text, offset, locator) {
 
         const rhs = statement.slice(target.consumed);
         const parser = new ExpressionParser(rhs, text, offset, locator);
-        let init;
+        let value;
 
         try {
-            init = parser.parseExpression();
+            value = parser.parseExpression();
 
             if (parser.token !== undefined) {
-                init = parser.opaque(rhs[0].start, rhs[rhs.length - 1].end);
+                value = parser.opaque(rhs[0].start, rhs[rhs.length - 1].end);
             }
         } catch (error) {
             if (error !== BAIL) {
                 throw error;
             }
 
-            init = parser.opaque(rhs[0].start, rhs[rhs.length - 1].end);
+            value = parser.opaque(rhs[0].start, rhs[rhs.length - 1].end);
         }
 
-        const id = target.id;
-        const declarator = parser.node('VariableDeclarator', target.start, init.range[1] - offset, { id, init });
-        const declaration = parser.node('VariableDeclaration', target.start, init.range[1] - offset, {
-            kind: 'const',
-            declarations: [declarator],
-        });
-        setParents(declaration, null);
-        declarations.push(declaration);
+        // `$x .= …` is `$x . …`: what it appends glues to the variable unless it brings a space.
+        if (target.appends) {
+            value = build.template([{ ...target.id }, value]);
+        }
+
+        let entry = byName.get(target.id.name);
+
+        if (entry === undefined) {
+            entry = { id: target.id, values: [] };
+            entries.push(entry);
+
+            if (target.id.type === 'Identifier') {
+                byName.set(target.id.name, entry);
+            }
+        }
+
+        entry.values.push(value);
     }
 
-    return declarations;
+    return entries.map(({ id, values }) => {
+        // The walker reads both sides of `||`, so it sees every value.
+        const init = values.reduce((left, right) => build.logical('||', left, right));
+        const declarator = build.node('VariableDeclarator', id.range[0], init.range[1], { id, init });
+        const declaration = build.node('VariableDeclaration', id.range[0], init.range[1], { kind: 'const', declarations: [declarator] });
+        setParents(declaration, null);
+
+        return declaration;
+    });
 }
 
 /**
- * `$attributes->class([...])->merge(['class' => ...])` as the object a Vue
- * `v-bind="{ class: ... }"` spread carries: the walker then reads the `class`
- * key as a class site. A bag that sets no class is the bare identifier, which
- * the walker leaves alone.
+ * `$attributes->class([...])->merge(['class' => ...])`, or a slot's
+ * `$heading->attributes->…`, as the object a Vue `v-bind="{ class: ... }"`
+ * spread carries: the walker then reads the `class` key as a class site. A bag
+ * that sets no class is the bare identifier, which the walker leaves alone.
+ * Any other expression is null.
  */
 export function parseAttributesBag(text, offset, locator) {
     const tokens = tokenizePhp(text);
-    const [first] = tokens;
+    const [first, arrow, property] = tokens;
+    const slot = first?.value !== '$attributes' && arrow?.value === '->' && property?.value === 'attributes';
 
-    if (first?.type !== 'variable' || first.value !== '$attributes') {
-        return parsePhpExpression(text, offset, locator);
+    if (first?.type !== 'variable' || !(slot || first.value === '$attributes')) {
+        return null;
     }
 
     const parser = new ExpressionParser(tokens, text, offset, locator);
     const properties = [];
-    let classValue = null;
-    let classToken = null;
-    parser.advance();
+    const classes = [];
+    parser.p = slot ? 3 : 1;
 
     try {
         while (parser.at('->') || parser.at('?->')) {
@@ -1069,13 +1198,22 @@ export function parseAttributesBag(text, offset, locator) {
                 break;
             }
 
-            const args = parser.parseArguments();
+            const [argument] = parser.parseArguments();
 
-            if (method.value === 'class' && args[0]) {
-                classValue = args[0];
-                classToken = method;
-            } else if (method.value === 'merge' && args[0]?.type === 'ObjectExpression') {
-                properties.push(...args[0].properties);
+            if ((method.value === 'class' || method.value === 'twMerge') && argument) {
+                classes.push(argument);
+            } else if (method.value === 'merge') {
+                const merged = argument?.type === 'ArrayExpression'
+                    ? argument.elements.flatMap((element) => (element.type === 'ObjectExpression' ? element.properties : []))
+                    : argument?.properties ?? [];
+
+                for (const entry of merged) {
+                    if (entry.key.type === 'Literal' && entry.key.value === 'class') {
+                        classes.push(entry.value);
+                    } else {
+                        properties.push(entry);
+                    }
+                }
             }
         }
     } catch (error) {
@@ -1086,11 +1224,15 @@ export function parseAttributesBag(text, offset, locator) {
         return opaqueOver(text, offset, locator);
     }
 
-    if (classValue !== null) {
-        const key = parser.node('Literal', classToken.start, classToken.end, { value: 'class', raw: 'class' });
-        properties.push(parser.node('Property', classToken.start, classValue.range[1] - offset, {
+    if (classes.length > 0) {
+        // One `class` key for every value: the plugin reads only the last of several.
+        const value = classes.length === 1
+            ? classes[0]
+            : parser.node('ArrayExpression', classes[0].range[0] - offset, classes.at(-1).range[1] - offset, { elements: classes });
+        const key = parser.node('Literal', first.start, first.end, { value: 'class', raw: 'class' });
+        properties.push(parser.node('Property', value.range[0] - offset, value.range[1] - offset, {
             key,
-            value: classValue,
+            value,
             computed: false,
             kind: 'init',
             method: false,
@@ -1099,7 +1241,7 @@ export function parseAttributesBag(text, offset, locator) {
     }
 
     const node = properties.length === 0
-        ? parser.node('Identifier', first.start, first.end, { name: '$attributes' })
+        ? parser.node('Identifier', first.start, first.end, { name: first.value })
         : parser.node('ObjectExpression', first.start, tokens[tokens.length - 1].end, { properties });
 
     setParents(node, null);

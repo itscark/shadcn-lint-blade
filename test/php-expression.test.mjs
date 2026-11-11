@@ -152,22 +152,59 @@ test('children carry parent links, as the walker expects of ESTree', () => {
     assert.equal(node.properties[0].key.parent, node.properties[0]);
 });
 
-test('assignments in a PHP block become const declarations; other statements are ignored', () => {
-    const php = "\n    $classes = 'block ' . 'w-full';\n    if ($x) { $y = 1; }\n    $fill = $sticky ? 'flex-1' : '';\n";
+test('assignments in a PHP block become const declarations, inside a control block too; other statements are ignored', () => {
+    const php = "\n    $classes = 'block ' . 'w-full';\n    if ($x) { $y = 1; }\n    $fill = $sticky ? 'flex-1' : '';\n    function f() { $local = 'p-4'; }\n";
     const source = ' '.repeat(OFFSET) + php;
-    const declarations = parsePhpAssignments(php, OFFSET, createLocator(source));
+    const declarations = parsePhpAssignments([{ text: php, offset: OFFSET }],createLocator(source));
 
-    assert.deepEqual(declarations.map((declaration) => declaration.declarations[0].id.name), ['$classes', '$fill']);
+    assert.deepEqual(declarations.map((declaration) => declaration.declarations[0].id.name), ['$classes', '$y', '$fill']);
     assert.equal(declarations[0].kind, 'const');
     assert.equal(declarations[0].declarations[0].init.type, 'TemplateLiteral');
-    assert.equal(declarations[1].declarations[0].init.type, 'ConditionalExpression');
-    assert.equal(source.slice(...declarations[1].range), "$fill = $sticky ? 'flex-1' : ''");
-    assert.equal(declarations[1].loc.start.line, 4);
+    assert.equal(declarations[2].declarations[0].init.type, 'ConditionalExpression');
+    assert.equal(source.slice(...declarations[2].range), "$fill = $sticky ? 'flex-1' : ''");
+    assert.equal(declarations[2].loc.start.line, 4);
+});
+
+test('a variable assigned more than once is one declaration holding every value', () => {
+    const php = "$c = 'p-4'; $c .= ' flex'; if ($x) { $c = 'grid'; }";
+    const declarations = parsePhpAssignments([{ text: php, offset: OFFSET }],createLocator(' '.repeat(OFFSET) + php));
+
+    assert.equal(declarations.length, 1);
+    const { init } = declarations[0].declarations[0];
+    assert.equal(init.operator, '||');
+    assert.equal(init.left.left.value, 'p-4');
+    assert.deepEqual(init.left.right.quasis.map((quasi) => quasi.value.cooked), ['', ' flex']);
+    assert.equal(init.left.right.expressions[0].name, '$c');
+    assert.equal(init.right.value, 'grid');
+    assert.equal(init.right.parent, init);
+});
+
+test('a statement runs to its semicolon, past the brace of a match; a switch label is stepped over', () => {
+    const php = "$c = match ($s) { 'a' => 'p-2', default => 'p-4' } . ' flex';\nswitch ($a) { case 'l': case 'r': $d = 'grid'; break; default: $d = 'block'; }";
+    const [c, d] = parsePhpAssignments([{ text: php, offset: OFFSET }],createLocator(' '.repeat(OFFSET) + php)).map((declaration) => declaration.declarations[0]);
+
+    assert.equal(c.init.type, 'TemplateLiteral');
+    assert.equal(c.init.quasis.at(-1).value.cooked, ' flex');
+    assert.deepEqual([d.id.name, d.init.left.value, d.init.right.value], ['$d', 'grid', 'block']);
+});
+
+test('an entry that cannot be read is opaque on its own; the entries around it are still read', () => {
+    const array = parse("['bg-red-500' => (bool) $a, 'p-4', $b & 1]");
+
+    assert.equal(array.type, 'ArrayExpression');
+    assert.equal(array.elements[0].properties[0].key.value, 'bg-red-500');
+    assert.equal(array.elements[0].properties[0].value.text, '(bool) $a');
+    assert.equal(array.elements[1].value, 'p-4');
+    assert.equal(array.elements[2].text, '$b & 1');
+
+    const match = parse("match (true) { $a & 1 => 'p-2', default => throw new Exception('x') }");
+    assert.equal(match.consequent.value, 'p-2');
+    assert.equal(match.alternate.text, "throw new Exception('x')");
 });
 
 test('a list destructuring becomes an ArrayPattern declaration the walker follows slot by slot', () => {
     const php = "[$label, $classes] = match ($env) { 'production' => ['Prod', 'bg-danger-surface'], default => ['Dev', 'bg-zinc-100'] };\nlist($a, , $c) = $parts;";
-    const declarations = parsePhpAssignments(php, OFFSET, createLocator(' '.repeat(OFFSET) + php));
+    const declarations = parsePhpAssignments([{ text: php, offset: OFFSET }],createLocator(' '.repeat(OFFSET) + php));
 
     assert.equal(declarations.length, 2);
     const [first, second] = declarations.map((declaration) => declaration.declarations[0]);
@@ -184,9 +221,19 @@ test('$attributes->class() and ->merge() become the object a class spread carrie
     const node = parseAttributesBag(text, OFFSET, createLocator(' '.repeat(OFFSET) + text));
 
     assert.equal(node.type, 'ObjectExpression');
-    assert.deepEqual(node.properties.map((property) => property.key.value), ['class', 'id', 'class']);
-    assert.equal(node.properties[2].value.type, 'ArrayExpression');
-    assert.equal(node.properties[0].value.value, 'p-4');
+    assert.deepEqual(node.properties.map((property) => property.key.value), ['id', 'class']);
+    // One `class` key: the plugin reads only the last of several.
+    assert.equal(node.properties[1].value.elements[0].type, 'ArrayExpression');
+    assert.equal(node.properties[1].value.elements[1].value, 'p-4');
+});
+
+test('a slot bag, twMerge and a mixed merge array set the class; a single value is not wrapped', () => {
+    const bag = (text) => parseAttributesBag(text, OFFSET, createLocator(' '.repeat(OFFSET) + text));
+
+    assert.equal(bag("$heading->attributes->class('p-4')").properties[0].value.value, 'p-4');
+    assert.equal(bag("$attributes->twMerge('p-4')").properties[0].value.value, 'p-4');
+    assert.equal(bag("$attributes->merge(['class' => 'p-4', 'x'])").properties[0].value.value, 'p-4');
+    assert.equal(bag("$open ? 'open' : ''"), null);
 });
 
 test('a bag that sets no class stays the bare identifier, which the walker leaves alone', () => {

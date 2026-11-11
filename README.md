@@ -45,6 +45,12 @@ export default defineConfig([
 npx eslint resources/views
 ```
 
+**Keep JavaScript rules off Blade files.** A config object without `files`, such as
+`js.configs.recommended`, also applies to `*.blade.php`; give it `files` or
+`ignores: ['**/*.blade.php']`. Core rules see only the `@php` assignments, without tokens and
+without the template that uses them: `no-unused-vars` reports every `@php` variable, `no-undef`
+every variable the controller passes in, and some rules throw.
+
 A Blade comment is an ESLint directive comment, inside a tag's attribute list too:
 `{{-- eslint-disable-next-line shadcn/no-inline-styles -- why --}}`. HTML comments are not
 directives; they ship to the browser.
@@ -58,9 +64,10 @@ directives; they ship to the browser.
 | `@class([...])` | `v-bind:class` with the array; keyed entries' keys are classes |
 | `:class="…"` on `<x-*>`, `<flux:*>`, `<livewire:*>` | `v-bind:class`, value parsed as PHP |
 | `:class="…"` on a plain element, `x-bind:class`, `::class` | `v-bind:class`, value parsed as JavaScript (Alpine) |
-| `{{ $attributes->class([...])->merge(['class' => …]) }}` in a tag | `v-bind="{ class: … }"` spread; a bag that sets no class is left alone |
+| `{{ $attributes->class([...])->merge(['class' => …]) }}` in a tag, a slot's `{{ $heading->attributes->class(…) }}` | `v-bind="{ class: … }"` spread; a bag that sets no class is left alone |
 | `style="…"`, `:style`, `@style([...])` | the same, as `style` |
 | `@php $x = …; @endphp`, `@php($x = …)`, `<?php $x = …; ?>`, `[$a, $b] = …` | `const $x = …` (or `const [$a, $b] = …`) in `Program.body`, resolved one hop from the template |
+| `$x = …; $x .= …; if (…) { $x = …; }` | one `const $x` whose value is every assignment, joined by `\|\|` |
 | `match ($v) { 'a' => '…', default => '…' }` | a chain of `ConditionalExpression`s: every arm's value is read, the conditions stay opaque |
 | `{{-- … --}}` | a `Block` comment, so ESLint directive comments work |
 | `<flux:badge>` | `rawName` kebab-cased (`flux-badge`), so it counts as a component and `color="red"` is a prop |
@@ -103,14 +110,24 @@ Notes for changing the parser; each one cost a debugging session.
   carries `range`, `loc` and `parent`: `getText`, `report` and `getScope` read them, and the
   reader's `elementOf(attribute)` is `attribute.parent.parent`.
 - **`@php` assignments are `const` declarations.** ESLint's own scope analysis then lets the plugin
-  follow `$x` from the template, the one hop a Vue `<script setup>` constant gets. A block
-  statement ends at its `}`: without that, the assignment after an `if (…) { … }` is lost.
+  follow `$x` from the template, the one hop a Vue `<script setup>` constant gets. The plugin
+  reads a variable from its first declaration only, so a variable gets one `const` across all PHP
+  blocks, holding every value assigned to it joined by `||`.
+- **A control block is opened, any other brace is not.** The statements inside `if`, `switch` or
+  `foreach` braces are read on their own. The brace of a `match` or a closure belongs to an
+  expression, which runs on to its `;`; a function or class body is skipped.
 - **Concatenation is a template literal.** `'bg-' . $tone` keeps `$tone` in a hole, so the glued
   chunk is dropped as a class rather than read as `bg-`. Flattening it would let half-classes pass.
-- **Opaque means unchecked.** `match` used to be one opaque node and a list destructuring was not
-  declared, so the classes inside both went unreported and the lint looked clean. Any PHP shape
-  that can carry a class string and reads as opaque is a silent blind spot; the only guard is a
-  test that expects a finding from inside it.
+  A hole whose strings all bring their own space (`'p-4' . ($x ? ' flex' : '')`,
+  `class="nav{{ $on ? ' active' : '' }}"`) glues nothing: the space moves into the neighbouring
+  chunk's cooked text.
+- **A bare `@word` in an attribute value is a directive.** `@else`, `@endif` and `@enderror` take
+  no parentheses; left in the text they read as class names. `@container` is Tailwind's class and
+  stays one.
+- **Opaque means unchecked.** Any PHP shape that can carry a class string and reads as opaque is a
+  silent blind spot; the only guard is a test that expects a finding from inside it. An array
+  entry or `match` arm that cannot be read (a cast, `throw`) is opaque on its own, so the entries
+  around it are still read.
 
 ## Tests
 

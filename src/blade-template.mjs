@@ -21,7 +21,7 @@
  * malformed markup: the tree is simply as good as the markup allows.
  */
 
-import { parseAttributesBag, parsePhpAssignments, parsePhpExpression } from './php-expression.mjs';
+import { match, parseAttributesBag, parsePhpAssignments, parsePhpExpression, separateHoles, stringEnd } from './php-expression.mjs';
 
 const VOID_ELEMENTS = new Set([
     'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta',
@@ -33,19 +33,11 @@ const RAW_TEXT_ELEMENTS = new Set(['script', 'style', 'textarea', 'title']);
 
 // Where Blade compiles a colon-prefixed attribute as PHP. On a plain element the
 // colon is Alpine's `x-bind:` shorthand and the value is JavaScript.
-const COMPONENT_TAG = /^(?:x-|flux:|livewire:)/;
+const COMPONENT_TAG = /^(?:x[-:]|flux:|livewire:)/;
 
 const TAG_NAME = /[A-Za-z][^\s/>]*/y;
 const DIRECTIVE_NAME = /[A-Za-z_]\w*/y;
 const ATTRIBUTE_NAME = /[^\s=/>]+/y;
-const BLADE_IN_VALUE = /\{\{|\{!!|@[A-Za-z_]\w*\s*\(/;
-
-function match(regex, text, at) {
-    regex.lastIndex = at;
-    const found = regex.exec(text);
-
-    return found && found.index === at ? found[0] : null;
-}
 
 function isSpace(c) {
     return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
@@ -65,7 +57,7 @@ class TemplateReader {
         this.fragment = this.node('VDocumentFragment', 0, source.length, { children: [] });
         this.stack = [this.fragment];
         this.comments = [];
-        this.declarations = [];
+        this.phpBlocks = [];
     }
 
     node(type, start, end, props) {
@@ -139,11 +131,24 @@ class TemplateReader {
         return end === -1 ? this.source.length : end + marker.length;
     }
 
-    /** `@name` opens a directive unless glued to a word, as in an e-mail address. */
+    /** `@name` opens a directive unless glued to a word, as in an e-mail address, or escaped as `@@name`. */
     atDirective(at) {
-        const before = this.source[at - 1];
+        return match(DIRECTIVE_NAME, this.source, at + 1) !== null && !/[\w@]/.test(this.source[at - 1] ?? '');
+    }
 
-        return match(DIRECTIVE_NAME, this.source, at + 1) !== null && !(before !== undefined && /\w/.test(before));
+    /** Just past the Blade echo or comment that opens at `at`; `at` when none does. */
+    echoEnd(at) {
+        const s = this.source;
+
+        if (s.startsWith('{{--', at)) {
+            return this.skipPast('--}}', at + 4);
+        }
+
+        if (s.startsWith('{{', at)) {
+            return this.skipPast('}}', at + 2);
+        }
+
+        return s.startsWith('{!!', at) ? this.skipPast('!!}', at + 3) : at;
     }
 
     readComment(at) {
@@ -165,7 +170,7 @@ class TemplateReader {
     }
 
     declare(php, offset) {
-        this.declarations.push(...parsePhpAssignments(php, offset, this.locator));
+        this.phpBlocks.push({ text: php, offset });
     }
 
     /** A directive in text: a `@php` block declares; everything else is skipped. */
@@ -191,7 +196,8 @@ class TemplateReader {
         }
 
         if (s[k] === '(') {
-            const close = this.skipBalanced(k);
+            // In text, parentheses that never close are prose (`@handle (it's …`), not arguments.
+            const close = this.skipBalanced(k, afterName);
 
             if (name === 'php') {
                 this.declare(s.slice(k + 1, close - 1), k + 1);
@@ -203,8 +209,8 @@ class TemplateReader {
         return afterName;
     }
 
-    /** From an opening parenthesis to just past its match, strings respected. */
-    skipBalanced(at) {
+    /** From an opening parenthesis to just past its match, strings respected; `unbalanced` when it has none. */
+    skipBalanced(at, unbalanced = this.source.length) {
         const s = this.source;
         let depth = 0;
 
@@ -212,7 +218,7 @@ class TemplateReader {
             const c = s[i];
 
             if (c === "'" || c === '"') {
-                i = this.stringEnd(i) - 1;
+                i = stringEnd(s, i) - 1;
             } else if (c === '(') {
                 depth++;
             } else if (c === ')' && --depth === 0) {
@@ -220,22 +226,7 @@ class TemplateReader {
             }
         }
 
-        return s.length;
-    }
-
-    stringEnd(at) {
-        const s = this.source;
-        const quote = s[at];
-
-        for (let i = at + 1; i < s.length; i++) {
-            if (s[i] === '\\') {
-                i++;
-            } else if (s[i] === quote) {
-                return i + 1;
-            }
-        }
-
-        return s.length;
+        return unbalanced;
     }
 
     readOpenTag(at) {
@@ -365,7 +356,7 @@ class TemplateReader {
                     valueStart = k;
 
                     while (k < n && !isSpace(s[k]) && s[k] !== '>') {
-                        k++;
+                        k = Math.max(k + 1, this.echoEnd(k));
                     }
 
                     valueEnd = k;
@@ -411,13 +402,7 @@ class TemplateReader {
             }
 
             if (c === '{') {
-                if (s.startsWith('{{--', i)) {
-                    i = this.skipPast('--}}', i + 4) - 1;
-                } else if (s.startsWith('{{', i)) {
-                    i = this.skipPast('}}', i + 2) - 1;
-                } else if (s.startsWith('{!!', i)) {
-                    i = this.skipPast('!!}', i + 3) - 1;
-                }
+                i = Math.max(i, this.echoEnd(i) - 1);
             } else if (c === '@') {
                 const name = match(DIRECTIVE_NAME, s, i + 1);
                 let k = name === null ? -1 : i + 1 + name.length;
@@ -470,10 +455,9 @@ class TemplateReader {
         const end = close === -1 ? s.length : close + 2;
         const innerStart = at + 2;
         const innerEnd = close === -1 ? s.length : close;
-        const inner = s.slice(innerStart, innerEnd);
+        const expression = parseAttributesBag(s.slice(innerStart, innerEnd), innerStart, this.locator);
 
-        if (/^\s*\$attributes\b/.test(inner)) {
-            const expression = parseAttributesBag(inner, innerStart, this.locator);
+        if (expression !== null) {
             attributes.push(this.boundAttribute(null, at, end, at, at + 2, innerStart, innerEnd, expression, startTag));
         }
 
@@ -483,7 +467,7 @@ class TemplateReader {
     /** `@class([...])` and `@style([...])` are bound attributes of that name. */
     directiveAttribute(name, at, argStart, argEnd, end, startTag) {
         const argument = parsePhpExpression(this.source.slice(argStart, argEnd), argStart, this.locator);
-        const expression = name === 'style' ? styleObjectOf(argument, this) : argument;
+        const expression = name === 'style' ? styleOf(argument, this) : argument;
 
         return this.boundAttribute(name, at, end, at + 1, at + 1 + name.length, argStart, argEnd, expression, startTag);
     }
@@ -504,10 +488,12 @@ class TemplateReader {
             return this.boundAttribute(name.slice(7), nameStart, end, nameStart, nameEnd, valueStart, valueEnd, this.expression(text, valueStart, false), startTag);
         }
 
-        if (text !== null && BLADE_IN_VALUE.test(text)) {
-            const expression = this.interpolated(valueStart, valueEnd);
+        if (text !== null) {
+            const template = this.interpolated(valueStart, valueEnd);
 
-            return this.boundAttribute(name, nameStart, end, nameStart, nameEnd, valueStart, valueEnd, expression, startTag);
+            if (template.expressions.length > 0) {
+                return this.boundAttribute(name, nameStart, end, nameStart, nameEnd, valueStart, valueEnd, template, startTag);
+            }
         }
 
         const key = this.node('VIdentifier', nameStart, nameEnd, { name, rawName: name });
@@ -606,16 +592,21 @@ class TemplateReader {
                 continue;
             }
 
-            if (s[i] === '@') {
-                const name = match(DIRECTIVE_NAME, s, i + 1);
-                let k = name === null ? -1 : i + 1 + name.length;
+            const name = s[i] === '@' ? match(DIRECTIVE_NAME, s, i + 1) : null;
 
-                while (k !== -1 && (s[k] === ' ' || s[k] === '\t')) {
+            if (name !== null) {
+                const nameEnd = i + 1 + name.length;
+                let k = nameEnd;
+
+                while (k < to && (s[k] === ' ' || s[k] === '\t')) {
                     k++;
                 }
 
-                if (k !== -1 && s[k] === '(') {
-                    const end = this.skipBalanced(k);
+                // `@container` is Tailwind's class; any other `@word` standing alone is a directive such as `@else`.
+                const bare = name !== 'container' && (i === from || isSpace(s[i - 1])) && (nameEnd === to || isSpace(s[nameEnd]));
+                const end = s[k] === '(' ? this.skipBalanced(k) : bare ? nameEnd : -1;
+
+                if (end !== -1) {
                     flush(i);
                     expressions.push(this.node('PhpExpression', i, end, { text: s.slice(i, end) }));
                     i = end;
@@ -635,53 +626,33 @@ class TemplateReader {
             child.parent = template;
         }
 
-        return template;
+        return separateHoles(template);
     }
 }
 
 /**
- * `@style(['color: red' => $x, 'display: none'])` as the style object
- * no-inline-styles judges property by property.
+ * `@style(['color: red' => $x, 'display: none'])` as `'color: red' || 'display: none'`:
+ * no-inline-styles reads both sides of `||` and splits each string into its
+ * declarations itself. An entry that is no string reads as a dynamic style.
  */
-function styleObjectOf(argument, reader) {
-    if (argument === null) {
-        return null;
-    }
-
-    const keys = argument.type === 'ObjectExpression'
+function styleOf(argument, reader) {
+    const entries = argument?.type === 'ObjectExpression'
         ? argument.properties.map((property) => property.key)
-        : argument.type === 'ArrayExpression'
-            ? argument.elements.map((element) => (element?.type === 'ObjectExpression' ? element.properties[0]?.key : element))
-            : null;
+        : argument?.type === 'ArrayExpression'
+            ? argument.elements.map((element) => (element.type === 'ObjectExpression' ? element.properties[0].key : element))
+            : [argument];
 
-    if (keys === null) {
-        return argument;
-    }
-
-    const properties = [];
-
-    for (const key of keys) {
-        if (key?.type !== 'Literal' || typeof key.value !== 'string' || !key.value.includes(':')) {
-            continue;
+    return entries.reduce((left, right) => {
+        if (left === null) {
+            return right;
         }
 
-        const colon = key.value.indexOf(':');
-        const [start, end] = key.range;
-        const name = reader.node('Literal', start, end, { value: key.value.slice(0, colon).trim(), raw: key.raw });
-        const value = reader.node('Literal', start, end, { value: key.value.slice(colon + 1).trim(), raw: key.raw });
-        const property = reader.node('Property', start, end, { key: name, value, computed: false, kind: 'init', method: false, shorthand: false });
-        name.parent = property;
-        value.parent = property;
-        properties.push(property);
-    }
+        const node = reader.node('LogicalExpression', left.range[0], right.range[1], { operator: '||', left, right });
+        left.parent = node;
+        right.parent = node;
 
-    const object = reader.node('ObjectExpression', argument.range[0], argument.range[1], { properties });
-
-    for (const property of properties) {
-        property.parent = object;
-    }
-
-    return object;
+        return node;
+    }, null);
 }
 
 /**
@@ -691,5 +662,5 @@ export function parseBladeTemplate(source, { locator, js }) {
     const reader = new TemplateReader(source, locator, js);
     reader.read();
 
-    return { fragment: reader.fragment, declarations: reader.declarations, comments: reader.comments };
+    return { fragment: reader.fragment, declarations: parsePhpAssignments(reader.phpBlocks, locator), comments: reader.comments };
 }

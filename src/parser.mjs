@@ -47,10 +47,6 @@ export const VISITOR_KEYS = { ...espree.VisitorKeys, ...TEMPLATE_KEYS };
 
 const SKIPPED_KEYS = new Set(['parent', 'loc', 'range', 'type']);
 
-function childKeys(node) {
-    return VISITOR_KEYS[node.type] ?? Object.keys(node).filter((key) => !SKIPPED_KEYS.has(key));
-}
-
 /** Rebases an espree AST so its ranges point into the Blade file. */
 function rebase(node, shift, locator, parent) {
     if (!node || typeof node !== 'object') {
@@ -122,7 +118,7 @@ function traverse(node, listeners) {
 
     dispatch(listeners, node.type, node);
 
-    for (const key of childKeys(node)) {
+    for (const key of VISITOR_KEYS[node.type]) {
         const child = node[key];
 
         if (Array.isArray(child)) {
@@ -148,7 +144,6 @@ function createServices(ast) {
     let scheduled = false;
 
     return {
-        isBlade: true,
         defineTemplateBodyVisitor(templateVisitor, scriptVisitor = {}) {
             for (const [selector, handler] of Object.entries(templateVisitor)) {
                 if (typeof handler !== 'function') {
@@ -175,11 +170,17 @@ function createServices(ast) {
             return {
                 ...scriptVisitor,
                 'Program:exit'(node) {
-                    if (typeof exit === 'function') {
-                        exit(node);
-                    }
+                    try {
+                        if (typeof exit === 'function') {
+                            exit(node);
+                        }
 
-                    traverse(ast.templateBody, listeners);
+                        traverse(ast.templateBody, listeners);
+                    } finally {
+                        // ESLint can lint one SourceCode again; that run registers its visitors afresh.
+                        listeners.clear();
+                        scheduled = false;
+                    }
                 },
             };
         },
@@ -208,9 +209,4 @@ export function parseForESLint(code) {
     }
 
     return { ast, services: createServices(ast), visitorKeys: VISITOR_KEYS };
-}
-
-/** The ESTree Program alone, for tooling that calls `parse` rather than `parseForESLint`. */
-export function parse(code) {
-    return parseForESLint(code).ast;
 }
