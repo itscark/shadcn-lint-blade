@@ -16,7 +16,7 @@ The package is not on npm. Install it from GitHub, pinned to a
 [release](https://github.com/itscark/shadcn-lint-blade/releases) tag:
 
 ```bash
-npm install --save-dev eslint @shadcn/lint github:itscark/shadcn-lint-blade#v0.1.0
+npm install --save-dev eslint @shadcn/lint github:itscark/shadcn-lint-blade#v0.1.1
 ```
 
 ## Usage
