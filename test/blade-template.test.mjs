@@ -152,7 +152,7 @@ test('Blade component tags are handed to the reader kebab-cased, so they count a
 
     assert.equal(badge.rawName, 'flux-badge');
     assert.equal(badge.name, 'flux:badge');
-    assert.equal(layout.rawName, 'x-layouts-app.sidebar');
+    assert.equal(layout.rawName, 'x-layouts-app-sidebar');
     assert.equal(livewire.rawName, 'livewire-foo');
     assert.equal(div.rawName, 'div');
     assert.equal(div.parent, layout);

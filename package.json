@@ -18,7 +18,10 @@
         "url": "git+https://github.com/itscark/shadcn-lint-blade.git"
     },
     "type": "module",
-    "exports": "./src/parser.mjs",
+    "exports": {
+        ".": "./src/parser.mjs",
+        "./components": "./src/components.mjs"
+    },
     "files": [
         "src"
     ],
