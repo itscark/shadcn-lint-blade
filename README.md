@@ -56,6 +56,51 @@ A Blade comment is an ESLint directive comment, inside a tag's attribute list to
 `{{-- eslint-disable-next-line shadcn/no-inline-styles -- why --}}`. HTML comments are not
 directives; they ship to the browser.
 
+## Components: `no-restyle` and `require-static-classes`
+
+These two rules act on a design-system component, which the plugin finds as a file in its `ui`
+directory (`.tsx`, `.ts`, `.jsx`, `.js`, `.vue`, `.svelte`). A Blade component has none, so they
+report nothing until `bladeComponents()` writes a stand-in `.vue` file per component view and
+`settings.shadcn.ui` points at them:
+
+```js
+import { bladeComponents } from '@itscark/shadcn-lint-blade/components';
+
+const ui = bladeComponents([
+    { prefix: 'x', dir: 'resources/views/components' }, // <x-card>, <x-forms.input>
+    { prefix: 'x-acme', dir: 'packages/acme/resources/views/components' }, // <x-acme::card>
+    { prefix: 'flux', dir: 'vendor/livewire/flux/stubs/resources/views/flux' }, // <flux:table.cell>
+]);
+
+export default defineConfig([
+    {
+        files: ['**/*.blade.php'],
+        languageOptions: { parser: blade },
+        plugins: { shadcn },
+        settings: { shadcn: { ui } },
+        rules: {
+            'shadcn/no-restyle': ['error', { allow: ['layout'] }],
+            'shadcn/require-static-classes': 'error',
+        },
+    },
+]);
+```
+
+`prefix` is the tag up to the component's own name: `x`, `x-acme` for `<x-acme::card>`, `flux`. The
+view's path follows, joined by dashes; `index.blade.php` and a file named like its directory
+(`panel/panel.blade.php`) stand for the directory. The stubs go to
+`node_modules/.cache/shadcn-lint-blade/components`; `{ outDir }` moves them. Every run of the config
+rewrites them and deletes the `.vue` files whose view is gone. A `dir` that does not exist throws, so a
+typo cannot switch the rules off unnoticed.
+
+The plugin names a component after its stub: `<x-acme::card>` is `XAcmeCard`, so its contract is
+`{ pattern: '^XAcmeCard$', allow: [...] }`, and a message says where to add a variant: in the stub. The
+stubs hold no variants or sizes. Every component owns its appearance, spacing and shape, and `allow` and
+`contracts` open what a page may pass it.
+
+Point these rules at the code that uses components, not at the views of the design system itself:
+`no-restyle` is off inside the component directory, as the plugin's docs say.
+
 ## What it reads
 
 | Blade | AST handed to the Vue reader |
@@ -71,7 +116,7 @@ directives; they ship to the browser.
 | `$x = …; $x .= …; if (…) { $x = …; }` | one `const $x` whose value is every assignment, joined by `\|\|` |
 | `match ($v) { 'a' => '…', default => '…' }` | a chain of `ConditionalExpression`s: every arm's value is read, the conditions stay opaque |
 | `{{-- … --}}` | a `Block` comment, so ESLint directive comments work |
-| `<flux:badge>` | `rawName` kebab-cased (`flux-badge`), so it counts as a component and `color="red"` is a prop |
+| `<flux:badge>`, `<x-forms.input>` | `rawName` kebab-cased (`flux-badge`, `x-forms-input`), so it counts as a component and `color="red"` is a prop |
 | echoes in text, control directives, `<!-- -->`, the `<?php new class … ?>` block of a Livewire SFC | skipped |
 
 PHP the walker cannot use (a method call, a comparison, a closure) becomes one opaque
@@ -80,9 +125,11 @@ never throws: the tree is as good as the markup allows.
 
 ## Limits
 
-- `no-restyle` and `require-static-classes` report nothing on Blade. They act on a design-system
-  component resolved from the exports of `.tsx/.jsx/.ts/.js/.vue/.svelte` files, and a Blade or
-  Flux component has no export. Configuring them reads as coverage that does not exist.
+- `no-restyle` and `require-static-classes` report nothing on Blade until its components have stubs
+  (see [Components](#components-no-restyle-and-require-static-classes)): the plugin resolves a
+  design-system component from `.tsx/.jsx/.ts/.js/.vue/.svelte` files, and a Blade or Flux component
+  has none. Configured without stubs they read as coverage that does not exist. With them, a component
+  has no variants or sizes to suggest, and `<livewire:*>` tags have no stub.
 - `no-unknown-classes` builds the theme from your stylesheet's full import graph. If that graph
   imports Flux's CSS from `vendor/`, install the PHP dependencies before linting; otherwise the
   plugin warns once and answers from its bundled grammar, which knows fewer classes.
@@ -97,9 +144,10 @@ Notes for changing the parser; each one cost a debugging session.
 
 - **Component tags are kebab-cased.** The Vue reader decides "component" from `rawName`'s spelling
   (a dash, a dot or a capital). `<flux:badge>` has none, so its `color="red"` read as a hard-coded
-  SVG paint. Component tags are handed over with `:`/`::` replaced by `-` (`flux-badge`,
-  `x-mail-message`); `name` keeps the real tag for matching the close tag. A message placeholder
-  `{{component}}` therefore shows the kebab spelling.
+  SVG paint. Component tags are handed over with `:`, `::` and `.` replaced by `-` (`flux-badge`,
+  `x-mail-message`, `x-forms-input`); `name` keeps the real tag for matching the close tag. A dot would
+  read as a member of a namespace, and a stub file in `components.mjs` is found by this name. A message
+  placeholder `{{component}}` therefore shows the kebab spelling.
 - **A colon attribute is PHP or Alpine.** Blade compiles `:prop="…"` only on component tags; on a
   plain element `:class` is Alpine's `x-bind:` shorthand and the value is JavaScript, parsed with
   espree. `x-bind:` and `::` are JavaScript on every tag. A value that does not parse in its

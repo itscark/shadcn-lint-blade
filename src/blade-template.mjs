@@ -238,8 +238,10 @@ class TemplateReader {
         // or a capital). A Blade component tag is spelled with a colon, so it is
         // handed over kebab-cased: <flux:badge> reads as <flux-badge>, a component
         // whose color="red" is a prop rather than an SVG paint attribute. `name`
-        // keeps the real tag for matching the close tag.
-        const rawName = component ? tagName.replace(/::?/g, '-') : tagName;
+        // keeps the real tag for matching the close tag. A dot (<x-forms.input>) becomes
+        // a dash too: the reader would take it for a member of a namespace, and a stub
+        // file (components.mjs) cannot carry a dot in the name it is found by.
+        const rawName = component ? tagName.replace(/::?|\./g, '-') : tagName;
         const attributes = [];
         const startTag = this.node('VStartTag', at, at, { attributes });
         const element = this.node('VElement', at, at, {
