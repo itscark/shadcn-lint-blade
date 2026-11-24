@@ -1,6 +1,6 @@
 {
     "name": "@itscark/shadcn-lint-blade",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "description": "An ESLint parser that lets @shadcn/lint lint Laravel Blade and Livewire views.",
     "keywords": [
         "eslint",
